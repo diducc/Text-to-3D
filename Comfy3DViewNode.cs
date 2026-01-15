@@ -9,7 +9,6 @@ public class Comfy3DNodeView : BaseNodeView
     private Button generateButton;
     private Button resetButton;
     private Label statusLabel;
-    private Image inputPreview;  
     private Image outputPreview;
 
     public override void Enable()
@@ -45,14 +44,6 @@ public class Comfy3DNodeView : BaseNodeView
         statusLabel.style.unityTextAlign = TextAnchor.MiddleCenter;
         statusLabel.style.whiteSpace = WhiteSpace.Normal;
 
-        inputPreview = new Image();
-        inputPreview.scaleMode = ScaleMode.ScaleToFit;
-        inputPreview.style.height = 200;
-        inputPreview.style.width = Length.Percent(100);
-        inputPreview.style.marginTop = 10;
-        inputPreview.style.backgroundColor = new Color(0,0,0, 0.2f);
-        inputPreview.style.display = DisplayStyle.None;
-
         outputPreview = new Image();
         outputPreview.scaleMode = ScaleMode.ScaleToFit;
         outputPreview.style.height = 200;
@@ -64,7 +55,6 @@ public class Comfy3DNodeView : BaseNodeView
 
         controlsContainer.Add(buttonContainer);
         controlsContainer.Add(statusLabel);
-        controlsContainer.Add(inputPreview);
         controlsContainer.Add(outputPreview);
 
         schedule.Execute(() => UpdateUI(node)).Every(100);
@@ -88,20 +78,11 @@ public class Comfy3DNodeView : BaseNodeView
         {
             outputPreview.image = node.outputPreview;
             outputPreview.style.display = DisplayStyle.Flex;
-            inputPreview.style.display = DisplayStyle.None; 
-        }
-        else if (node.inputImage != null)
-        {
-            inputPreview.image = node.inputImage;
-            inputPreview.style.display = DisplayStyle.Flex;
-
-            outputPreview.style.display = DisplayStyle.None;
-            outputPreview.image = null;
         }
         else
         {
-            inputPreview.style.display = DisplayStyle.None;
             outputPreview.style.display = DisplayStyle.None;
+            outputPreview.image = null;
         }
     }
 }

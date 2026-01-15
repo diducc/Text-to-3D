@@ -6,19 +6,47 @@ using System;
 using System.Collections;
 using System.Text;
 using System.IO;
+using Newtonsoft.Json.Linq;
 
 public static class ComfyUIClient2D
 {
-    public static IEnumerator Generate(string server, string prompt, Comfy2DParams settings, string saveFolder, Action<string> onStatus, Action<Texture2D> onSuccess, Action<string> onError)
-    {
-        int seed = UnityEngine.Random.Range(0, 999999999);
-        string promptId = null;
+    private const string TEMPLATE_PATH_RELATIVE = "Editor/ComfyJSON/2D";
 
-        onStatus("Sending prompt to ComfyUI (2D)...");
-        using (var w = new UnityWebRequest($"http://{server}/prompt", "POST"))
+    public static IEnumerator Generate(string server, string modelFileName, string prompt, Comfy2DParams settings, string saveFolder, Action<string> onStatus, Action<Texture2D> onSuccess, Action<string> onError)
+    {
+        string templatePath = Path.Combine(Application.dataPath, TEMPLATE_PATH_RELATIVE, modelFileName);
+        
+        if (!File.Exists(templatePath))
         {
-            string jsonPayload = GetJSONTemplate(prompt, seed, settings);
-            byte[] bodyRaw = Encoding.UTF8.GetBytes($"{{\"prompt\":{jsonPayload}}}");
+            onError($"Template non trovato qui: {templatePath}");
+            yield break;
+        }
+
+        JObject workflow;
+        try
+        {
+            string jsonContent = File.ReadAllText(templatePath);
+            workflow = JObject.Parse(jsonContent);
+        }
+        catch (Exception ex)
+        {
+            onError($"Errore lettura JSON: {ex.Message}");
+            yield break;
+        }
+
+        InjectParams(workflow, prompt, settings);
+
+        string promptId = null;
+        string url = $"http://{server}/prompt";
+
+        onStatus($"Sending prompt to {url}...");
+        
+        using (var w = new UnityWebRequest(url, "POST"))
+        {
+            JObject payload = new JObject();
+            payload["prompt"] = workflow;
+            
+            byte[] bodyRaw = Encoding.UTF8.GetBytes(payload.ToString(Newtonsoft.Json.Formatting.None));
             w.uploadHandler = new UploadHandlerRaw(bodyRaw);
             w.downloadHandler = new DownloadHandlerBuffer();
             w.SetRequestHeader("Content-Type", "application/json");
@@ -27,10 +55,20 @@ public static class ComfyUIClient2D
             var op = w.SendWebRequest();
             while (!op.isDone) yield return null;
 
-            if (w.result != UnityWebRequest.Result.Success) { onError($"Connection Error: {w.error}"); yield break; }
+            if (w.result != UnityWebRequest.Result.Success) 
+            { 
+                onError($"Connection Error ({w.responseCode}): {w.error}\nSu: {url}"); 
+                yield break; 
+            }
 
             string res = w.downloadHandler.text;
-            if (res.Contains("prompt_id"))
+            
+            try {
+                JObject jsonRes = JObject.Parse(res);
+                promptId = jsonRes["prompt_id"]?.ToString();
+            } catch { }
+
+            if (string.IsNullOrEmpty(promptId) && res.Contains("prompt_id"))
             {
                 int s = res.IndexOf("\"prompt_id\":") + 12;
                 while (s < res.Length && (res[s] == ' ' || res[s] == '"')) s++;
@@ -40,6 +78,7 @@ public static class ComfyUIClient2D
         }
 
         if (string.IsNullOrEmpty(promptId)) { onError("Failed to retrieve Prompt ID."); yield break; }
+
 
         onStatus($"Rendering 2D (ID: {promptId})...");
         string fileName = null;
@@ -60,7 +99,7 @@ public static class ComfyUIClient2D
                     string json = w.downloadHandler.text;
                     if (json.Contains("outputs") && json.Contains(promptId))
                     {
-                        ParseHistoryForFile(json, out fileName, out subFolder, out fileType);
+                        ParseHistoryForFileJObject(json, promptId, out fileName, out subFolder, out fileType);
                         if (!string.IsNullOrEmpty(fileName)) break;
                     }
                     else if (json.Contains("status_str\": \"error")) { onError("ComfyUI reported an error."); yield break; }
@@ -71,13 +110,14 @@ public static class ComfyUIClient2D
 
         if (string.IsNullOrEmpty(fileName)) { onError("Timeout waiting for generation."); yield break; }
 
+
         yield return new WaitForSeconds(0.5f);
         onStatus("Downloading 2D image...");
         
-        string url = $"http://{server}/view?filename={fileName}&type={fileType}";
-        if (!string.IsNullOrEmpty(subFolder)) url += $"&subfolder={subFolder}";
+        string dlUrl = $"http://{server}/view?filename={fileName}&type={fileType}";
+        if (!string.IsNullOrEmpty(subFolder)) dlUrl += $"&subfolder={subFolder}";
 
-        using (var w = UnityWebRequest.Get(url))
+        using (var w = UnityWebRequest.Get(dlUrl))
         {
             w.downloadHandler = new DownloadHandlerBuffer();
             w.useHttpContinue = false;
@@ -90,9 +130,10 @@ public static class ComfyUIClient2D
                 Texture2D tex = new Texture2D(2, 2);
                 if (tex.LoadImage(data))
                 {
-                    tex.name = "ComfyResult";
+                    tex.name = fileName;
                     if (!Directory.Exists(saveFolder)) Directory.CreateDirectory(saveFolder);
-                    string path = $"{saveFolder}/Comfy_{seed}.png";
+                    
+                    string path = Path.Combine(saveFolder, $"Comfy_{DateTime.Now.Ticks}.png");
                     File.WriteAllBytes(path, data);
                     AssetDatabase.Refresh();
                     
@@ -105,59 +146,67 @@ public static class ComfyUIClient2D
         }
     }
 
-
-    private static void ParseHistoryForFile(string json, out string filename, out string subfolder, out string type)
+    private static void ParseHistoryForFileJObject(string json, string promptId, out string filename, out string subfolder, out string type)
     {
         filename = null; subfolder = ""; type = "output";
-        try {
-            int outputsIndex = json.IndexOf("\"outputs\""); if (outputsIndex == -1) return;
-            int openBracket = json.IndexOf("[", outputsIndex);
-            int closeBracket = json.IndexOf("]", openBracket);
-            if (openBracket == -1) return;
-            string block = json.Substring(openBracket, closeBracket - openBracket);
-            
-            filename = ExtractValue(block, "\"filename\":");
-            subfolder = ExtractValue(block, "\"subfolder\":");
-            string tp = ExtractValue(block, "\"type\":");
-            if (!string.IsNullOrEmpty(tp)) type = tp;
-        } catch { }
-    }
-
-    private static string ExtractValue(string source, string key)
-    {
-        int idx = source.IndexOf(key); if (idx == -1) return null;
-        int s = source.IndexOf("\"", idx + key.Length) + 1;
-        int e = source.IndexOf("\"", s);
-        return source.Substring(s, e - s);
-    }
-
-    // In ComfyUIClient2D.cs
-
-private static string GetJSONTemplate(string prompt, int seed, Comfy2DParams p)
-    {
-        string safePrompt = prompt.Replace("\"", "\\\"").Replace("\n", " ");
-        string json = @"
+        try
         {
-            ""1"": { ""inputs"": { ""clip_name1"": ""clip_g.safetensors"", ""clip_name2"": ""clip_l.safetensors"", ""clip_name3"": ""t5xxl_fp16.safetensors"" }, ""class_type"": ""TripleCLIPLoader"" },
-            ""2"": { ""inputs"": { ""text"": ""bad quality"", ""clip"": [ ""1"", 0 ] }, ""class_type"": ""CLIPTextEncode"" },
-            ""5"": { ""inputs"": { ""width"": %WIDTH%, ""height"": %HEIGHT%, ""batch_size"": 1 }, ""class_type"": ""EmptySD3LatentImage"" },
-            ""6"": { ""inputs"": { ""text"": ""%PROMPT%"", ""clip"": [ ""1"", 0 ] }, ""class_type"": ""CLIPTextEncode"" },
-            ""7"": { ""inputs"": { ""seed"": %SEED%, ""steps"": %STEPS%, ""cfg"": %CFG%, ""sampler_name"": ""euler"", ""scheduler"": ""simple"", ""denoise"": 1, ""model"": [ ""10"", 0 ], ""positive"": [ ""6"", 0 ], ""negative"": [ ""2"", 0 ], ""latent_image"": [ ""5"", 0 ] }, ""class_type"": ""KSampler"" },
-            ""8"": { ""inputs"": { ""samples"": [ ""7"", 0 ], ""vae"": [ ""10"", 2 ] }, ""class_type"": ""VAEDecode"" },
-            ""10"": { ""inputs"": { ""ckpt_name"": ""sd3.5_large.safetensors"" }, ""class_type"": ""CheckpointLoaderSimple"" },
-            ""11"": { ""inputs"": { ""anything"": [ ""8"", 0 ] }, ""class_type"": ""easy cleanGpuUsed"" },
-            ""14"": { ""inputs"": { ""filename_prefix"": ""2d"", ""images"": [ ""8"", 0 ] }, ""class_type"": ""SaveImage"" },
-            ""17"": { ""inputs"": { ""clean_file_cache"": true, ""clean_processes"": true, ""clean_dlls"": true, ""retry_times"": 3, ""anything"": [ ""8"", 0 ] }, ""class_type"": ""RAMCleanup"" },
-            ""18"": { ""inputs"": { ""offload_model"": true, ""offload_cache"": true, ""anything"": [ ""8"", 0 ] }, ""class_type"": ""VRAMCleanup"" }
-        }";
+            JObject root = JObject.Parse(json);
+            JObject outputs = (JObject)root[promptId]?["outputs"];
+            if (outputs != null)
+            {
+                foreach (var node in outputs)
+                {
+                    JArray images = (JArray)node.Value["images"];
+                    if (images.Count > 0)
+                    {
+                        filename = images[0]["filename"]?.ToString();
+                        subfolder = images[0]["subfolder"]?.ToString();
+                        type = images[0]["type"]?.ToString();
+                        return;
+                    }
+                }
+            }
+        }
+        catch {}
+    }
 
-        return json
-            .Replace("%PROMPT%", safePrompt)
-            .Replace("%SEED%", seed.ToString())
-            .Replace("%WIDTH%", p.width.ToString())
-            .Replace("%HEIGHT%", p.height.ToString())
-            .Replace("%STEPS%", p.steps.ToString())
-            .Replace("%CFG%", p.cfg.ToString("F1").Replace(',', '.'));
+    private static void InjectParams(JObject workflow, string prompt, Comfy2DParams s)
+    {
+
+        foreach (var item in workflow)
+        {
+            JToken node = item.Value;
+            string title = node["_meta"]?["title"]?.ToString();
+            JObject inputs = (JObject)node["inputs"];
+            
+            if (inputs == null) continue;
+
+            if (title == "Positive Prompt")
+            {
+                if (inputs.ContainsKey("text")) inputs["text"] = prompt;
+            }
+            else if (title == "Resolution")
+            {
+                if (s.width > 0) inputs["width"] = s.width;
+                if (s.height > 0) inputs["height"] = s.height;
+            }
+            else if (title == "Params")
+            {
+                InjectIfPresent(inputs, "steps", s.steps);
+                InjectIfPresent(inputs, "cfg", s.cfg);
+                InjectIfPresent(inputs, "guidance", s.cfg);     //esistono nodi che usano guidance al posto di cfg
+            }
+        }
+    }
+
+    private static void InjectIfPresent(JObject inputs, string key, object value)
+    {
+        if (inputs.ContainsKey(key))
+        {
+            if (value is int i && i > 0) inputs[key] = i;
+            else if (value is float f && f > 0) inputs[key] = f;
+        }
     }
 }
 #endif

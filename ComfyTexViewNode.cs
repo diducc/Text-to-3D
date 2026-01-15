@@ -8,8 +8,7 @@ public class ComfyTexNodeView : BaseNodeView
 {
     private Button generateButton;
     private Button resetButton; 
-    private Label statusLabel;
-    private Image inputPreview;  
+    private Label statusLabel; 
     private Image outputPreview;
 
     public override void Enable()
@@ -47,14 +46,6 @@ public class ComfyTexNodeView : BaseNodeView
         statusLabel.style.whiteSpace = WhiteSpace.Normal;
         statusLabel.style.marginBottom = 5;
 
-        inputPreview = new Image();
-        inputPreview.scaleMode = ScaleMode.ScaleToFit;
-        inputPreview.style.height = 180;
-        inputPreview.style.width = Length.Percent(100);
-        inputPreview.style.backgroundColor = new Color(0,0,0, 0.2f);
-        inputPreview.style.display = DisplayStyle.None;
-        inputPreview.Add(new Label("Input Image") { style = { color = Color.gray, fontSize = 9 } });
-
         outputPreview = new Image();
         outputPreview.scaleMode = ScaleMode.ScaleToFit;
         outputPreview.style.height = 200;
@@ -68,7 +59,6 @@ public class ComfyTexNodeView : BaseNodeView
 
         controlsContainer.Add(buttonContainer);
         controlsContainer.Add(statusLabel);
-        controlsContainer.Add(inputPreview);
         controlsContainer.Add(outputPreview);
 
         schedule.Execute(() => UpdateUI(node)).Every(100);
@@ -92,20 +82,11 @@ public class ComfyTexNodeView : BaseNodeView
         {
             outputPreview.image = node.outputPreview;
             outputPreview.style.display = DisplayStyle.Flex;
-            inputPreview.style.display = DisplayStyle.None; 
-        }
-        else if (node.inputImage != null)
-        {
-            inputPreview.image = node.inputImage;
-            inputPreview.style.display = DisplayStyle.Flex;
-
-            outputPreview.style.display = DisplayStyle.None;
-            outputPreview.image = null;
         }
         else
         {
-            inputPreview.style.display = DisplayStyle.None;
             outputPreview.style.display = DisplayStyle.None;
+            outputPreview.image = null;
         }
     }
 }

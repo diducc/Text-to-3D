@@ -11,6 +11,8 @@ public class ComfyGen2DNode : BaseNode
     public bool isProcessing = false;
     public string statusMessage = "Ready";
 
+    [SerializeField]
+    public string selectedModelFile = "";
 
     // INPUT
     [Input(name = "Prompt"), ShowAsDrawer]
@@ -31,8 +33,13 @@ public class ComfyGen2DNode : BaseNode
 
     public IEnumerator StartGeneration()
     {
+        if (string.IsNullOrEmpty(selectedModelFile))
+        {
+            statusMessage = "Error: Select a Model!";
+            yield break;
+        }
+
         statusMessage = "Syncing Data...";
-        Debug.Log("[Generator] 1. Starting Process...");
 
         // LETTURA DEI CAVI
         try 
@@ -44,14 +51,11 @@ public class ComfyGen2DNode : BaseNode
         {
             Debug.LogError($"[Generator] Graph Process Error: {e.Message}");
         }
-        if (settings.width == 0 || settings.height == 0 || settings.steps == 0 || settings.cfg == 0)
-        {
-            Debug.Log("[Generator] Using Default Settings");
-            settings = new Comfy2DParams 
-            { 
-                width = 1024, height = 1024, steps = 30, cfg = 8.0f 
-            };
-        }
+        if (settings.width == 0) settings = new Comfy2DParams 
+        { 
+            width = 1024, height = 1024, steps = 30, cfg = 8.0f 
+        };
+
         if (string.IsNullOrEmpty(prompt))
         {
             statusMessage = "Error: Prompt Missing!";
@@ -64,6 +68,7 @@ public class ComfyGen2DNode : BaseNode
         // CHIAMATA AL CLIENT
         yield return ComfyUIClient2D.Generate(
             serverAddress,
+            selectedModelFile,
             prompt,
             settings,
             savePath,

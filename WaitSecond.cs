@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System;
 using UnityEngine;
 
-// Classe helper per definire l'attesa
 public class WaitForSeconds 
 { 
     public float waitTime; 
@@ -89,7 +88,7 @@ public class EditorCoroutineRunner
             else
             {
                 waitTimestamp = 0f; 
-            }
+            }{}
         }
     }
 }

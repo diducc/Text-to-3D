@@ -19,6 +19,7 @@ public class ComfyParam2DNode : BaseNode
     [Tooltip("Più passi = più qualità ma più lento")]
     public int steps = 35;
     [Tooltip("Creatività vs Fedeltà al prompt (consigliato 7-9)")]
+    [Range(0, 100)]
     public float cfg = 8.0f;
 
     public override string name => "2D Parameters";
