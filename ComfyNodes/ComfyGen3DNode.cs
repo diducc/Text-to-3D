@@ -13,6 +13,9 @@ public class ComfyGen3DNode : BaseNode
     public bool isProcessing = false;
     public string statusMessage = "Waiting for Image...";
 
+    [SerializeField]
+    public string selectedModelFile = "";
+
     //INPUT
     [Input(name = "Input Image")]
     public Texture2D inputImage; 
@@ -42,6 +45,12 @@ public class ComfyGen3DNode : BaseNode
     {
         outputPreview = null; 
         
+        if (string.IsNullOrEmpty(selectedModelFile))
+        {
+            statusMessage = "Error: Select a Model!";
+            yield break;
+        }
+        
         try { var p = new ProcessGraphProcessor(graph); p.Run(); } catch { }
 
         if (inputImage == null) { statusMessage = "Error: No Input Image!"; yield break; }
@@ -66,6 +75,7 @@ public class ComfyGen3DNode : BaseNode
 
         yield return ComfyUIClient3D.Generate(
             serverAddress,
+            selectedModelFile,
             imageBytes,
             settings,
             savePath,

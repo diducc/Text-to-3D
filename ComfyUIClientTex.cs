@@ -12,6 +12,7 @@ public static class ComfyUIClientTex
     public static IEnumerator Generate(string server, byte[] imageBytes, string localMeshPath, ComfyTexGenParams settings, string saveFolder, Action<string> onStatus, Action<string, Texture2D> onSuccess, Action<string> onError)
     {
         int seed = UnityEngine.Random.Range(0, 999999999);
+        float startTime = Time.realtimeSinceStartup;
         string meshFileName = Path.GetFileName(localMeshPath);
         string uploadImgName = $"tex_source_{seed}.png";
         
@@ -39,19 +40,33 @@ public static class ComfyUIClientTex
 
             var op = w.SendWebRequest();
             while (!op.isDone) yield return null;
-            if (w.result != UnityWebRequest.Result.Success) { onError($"Conn Error: {w.error}"); yield break; }
+            if (w.result != UnityWebRequest.Result.Success)
+            {
+                onError($"Conn Error: {w.error}");
+                ComfyStatsRegistry.CurrentVRAMUsed = 0;
+                yield break;
+            }
 
             string res = w.downloadHandler.text;
             if (res.Contains("prompt_id")) promptId = ExtractJsonValueSimple(res, "prompt_id");
         }
 
-        if (string.IsNullOrEmpty(promptId)) { onError("No Prompt ID"); yield break; }
+        if (string.IsNullOrEmpty(promptId)) 
+        {
+            onError("No Prompt ID");
+            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+            yield break;
+        }
 
         bool isReady = false;
         onStatus($"Texturing (ID: {promptId})...");
+
         for (int i = 0; i < 600; i++) 
         {
             yield return new WaitForSeconds(1.0f);
+
+            yield return ComfyStatsFetcher.UpdateVRAM(server);
+
             using (var w = UnityWebRequest.Get($"http://{server}/history/{promptId}"))
             {
                 w.useHttpContinue = false;
@@ -63,14 +78,28 @@ public static class ComfyUIClientTex
                     string json = w.downloadHandler.text;
                     if (json.Contains($"\"{promptId}\"")) 
                     {
-                        if (json.Contains("error")) { onError("ComfyUI Error"); yield break; }
+                        if (json.Contains("error")) 
+                        { 
+                            onError("ComfyUI Error"); 
+                            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+                            yield break;
+                        }
                         isReady = true; break; 
                     }
                 }
             }
-            onStatus($"Painting... ({i}s)");
+            int elapsed = (int)(Time.realtimeSinceStartup - startTime);
+            onStatus($"Painting... ({elapsed}s) [VRAM: {ComfyStatsRegistry.CurrentVRAMUsed:F0}MB]");
         }
-        if (!isReady) { onError("Timeout"); yield break; }
+        
+        if (!isReady) 
+        { 
+            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+            onError("Timeout"); 
+            yield break;
+        }
+
+        ComfyStatsRegistry.CurrentVRAMUsed = 0;
 
         onStatus("Downloading Textured Model...");
         string url = $"http://{server}/view?filename={expectedOutputName}&type=output";
@@ -146,7 +175,6 @@ public static class ComfyUIClientTex
 
     private static string GetJSONTemplate(string imgName, string meshName, int seed, ComfyTexGenParams p, string outputName)
     {
-        
         string json = @"
         {
         ""2"": {

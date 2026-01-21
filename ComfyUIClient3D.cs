@@ -6,17 +6,56 @@ using UnityEngine;
 using UnityEngine.Networking;
 using System.IO;
 using UnityEditor;
+using Newtonsoft.Json.Linq;
 
 public static class ComfyUIClient3D
 {
-    public static IEnumerator Generate(string server, byte[] imageBytes, Comfy3DParams settings, string saveFolder, Action<string> onStatus, Action<string, Texture2D> onSuccess, Action<string> onError)
+    private const string TEMPLATE_PATH_RELATIVE = "Editor/ComfyJSON/3D"; 
+
+    public static IEnumerator Generate(string server, string modelFileName, byte[] imageBytes, Comfy3DParams settings, string saveFolder, Action<string> onStatus, Action<string, Texture2D> onSuccess, Action<string> onError)
     {
+        float startTime = Time.realtimeSinceStartup;
+        float vramSum = 0;
+        float vramMax = 0;
+        int vramSamples = 0;
 
         int seed = UnityEngine.Random.Range(0, 999999999);
+        string jsonPath = Path.Combine(Application.dataPath, TEMPLATE_PATH_RELATIVE, modelFileName);
         string uploadName = $"unity_input_{seed}.png";
-        
-        string expectedFileName = $"Mesh_{seed}.glb"; 
 
+        if (!File.Exists(jsonPath)) 
+        { 
+            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+            onError($"Template non trovato: {jsonPath}"); 
+            yield break; 
+        }
+
+        JObject workflow;
+        try { workflow = JObject.Parse(File.ReadAllText(jsonPath)); }
+        catch (Exception ex) 
+        { 
+            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+            onError($"Errore JSON: {ex.Message}"); 
+            yield break; 
+        }
+
+        InjectParams(workflow, settings, seed);
+
+        bool imageNodeFound = false;
+        foreach (var item in workflow)
+        {
+            if (item.Value["class_type"]?.ToString() == "LoadImage")
+            {
+                if (item.Value["inputs"] != null)
+                {
+                    item.Value["inputs"]["image"] = uploadName;
+                    imageNodeFound = true;
+                }
+            }
+        }
+        if (!imageNodeFound) Debug.LogWarning("Comfy3D: Nodo 'LoadImage' non trovato nel JSON. L'upload potrebbe essere ignorato.");
+
+        string expectedFileName = $"Mesh_{seed}.glb"; 
         string promptId = null;
 
         onStatus("Uploading image...");
@@ -29,16 +68,24 @@ public static class ComfyUIClient3D
             w.useHttpContinue = false;
             var op = w.SendWebRequest();
             while (!op.isDone) yield return null;
-            if (w.result != UnityWebRequest.Result.Success) { onError($"Upload Failed: {w.error}"); yield break; }
+            if (w.result != UnityWebRequest.Result.Success) 
+            { 
+                ComfyStatsRegistry.CurrentVRAMUsed = 0;
+                onError($"Upload Failed: {w.error}"); 
+                yield break; 
+            }
         }
 
         onStatus("Sending Workflow...");
         
-        string jsonPayload = GetJSONTemplate(uploadName, seed, settings);
-        
-        using (var w = new UnityWebRequest($"http://{server}/prompt", "POST"))
+        string url = $"http://{server}/prompt";
+        using (var w = new UnityWebRequest(url, "POST"))
         {
-            byte[] bodyRaw = Encoding.UTF8.GetBytes($"{{\"prompt\":{jsonPayload}}}");
+            JObject payload = new JObject();
+            payload["prompt"] = workflow;
+            
+            byte[] bodyRaw = Encoding.UTF8.GetBytes(payload.ToString(Newtonsoft.Json.Formatting.None));
+            
             w.uploadHandler = new UploadHandlerRaw(bodyRaw);
             w.downloadHandler = new DownloadHandlerBuffer();
             w.SetRequestHeader("Content-Type", "application/json");
@@ -46,24 +93,37 @@ public static class ComfyUIClient3D
 
             var op = w.SendWebRequest();
             while (!op.isDone) yield return null;
-            if (w.result != UnityWebRequest.Result.Success) { onError($"Conn Error: {w.error}"); yield break; }
+            
+            if (w.result != UnityWebRequest.Result.Success) 
+            { 
+                ComfyStatsRegistry.CurrentVRAMUsed = 0;
+                onError($"Conn Error: {w.error}"); 
+                yield break; 
+            }
 
             string res = w.downloadHandler.text;
-            if (res.Contains("prompt_id"))
-            {
-                promptId = ExtractJsonValueSimple(res, "prompt_id");
-            }
+            try { promptId = JObject.Parse(res)["prompt_id"]?.ToString(); } catch { }
         }
         
-        if (string.IsNullOrEmpty(promptId)) { onError("Failed to get Prompt ID"); yield break; }
+        if (string.IsNullOrEmpty(promptId)) 
+        { 
+            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+            onError("Failed to get Prompt ID"); 
+            yield break; 
+        }
 
         bool isReady = false;
         onStatus($"Processing 3D (ID: {promptId})...");
         
         for (int i = 0; i < 600; i++) 
         {
-            float start = Time.realtimeSinceStartup;
-            while (Time.realtimeSinceStartup < start + 1.0f) yield return null; 
+            yield return new WaitForSeconds(1.0f);
+            yield return ComfyStatsFetcher.UpdateVRAM(server, (currentVram) => 
+            {
+                vramSamples++;
+                vramSum += currentVram;
+                if (currentVram > vramMax) vramMax = currentVram;
+            });
 
             using (var w = UnityWebRequest.Get($"http://{server}/history/{promptId}"))
             {
@@ -78,6 +138,7 @@ public static class ComfyUIClient3D
                     {
                         if (json.Contains("status_str\": \"error") || json.Contains("\"error\""))
                         {
+                            ComfyStatsRegistry.CurrentVRAMUsed = 0;
                             onError("ComfyUI Error during generation.");
                             yield break;
                         }
@@ -87,17 +148,28 @@ public static class ComfyUIClient3D
                     }
                 }
             }
-            if (i % 2 == 0) onStatus($"Generating Model... ({i}s)");
+            int elapsed = (int)(Time.realtimeSinceStartup - startTime);
+            onStatus($"Generating Model... ({elapsed}s) [VRAM: {ComfyStatsRegistry.CurrentVRAMUsed:F0}MB]");
         }
 
-        if (!isReady) { onError("Timeout: Generation took too long."); yield break; }
+        if (!isReady) 
+        { 
+            ComfyStatsRegistry.CurrentVRAMUsed = 0;
+            onError("Timeout: Generation took too long."); 
+            yield break; 
+        }
 
+        float duration = Time.realtimeSinceStartup - startTime;
+        float runAverage = vramSamples > 0 ? vramSum / vramSamples : 0;
+        ComfyStatsRegistry.LogRun(modelFileName, duration, runAverage, vramMax);
+        
+        ComfyStatsRegistry.CurrentVRAMUsed = 0;
 
         onStatus($"Downloading {expectedFileName}...");
         
-        string url = $"http://{server}/view?filename={expectedFileName}&type=output";
+        string expectedUrl = $"http://{server}/view?filename={expectedFileName}&type=output";
 
-        using (var w = UnityWebRequest.Get(url))
+        using (var w = UnityWebRequest.Get(expectedUrl))
         {
             w.downloadHandler = new DownloadHandlerBuffer();
             w.useHttpContinue = false;
@@ -141,82 +213,42 @@ public static class ComfyUIClient3D
         }
     }
 
-    private static string ExtractJsonValueSimple(string source, string key)
+    private static void InjectParams(JObject workflow, Comfy3DParams s, int seed)
     {
-        string searchKey = $"\"{key}\":";
-        int idx = source.IndexOf(searchKey);
-        if (idx == -1) return null;
-        int start = source.IndexOf("\"", idx + searchKey.Length) + 1;
-        int end = source.IndexOf("\"", start);
-        return source.Substring(start, end - start);
+        foreach (var item in workflow)
+        {
+            JToken node = item.Value;
+            string title = node["_meta"]?["title"]?.ToString();
+            JObject inputs = (JObject)node["inputs"];
+            if (inputs == null) continue;
+            
+            if (title == "Params")
+            { 
+                InjectIfPresent(inputs, "steps", s.steps);
+                InjectIfPresent(inputs, "guidance", s.guidance);
+                InjectIfPresent(inputs, "octree_resolution", s.octreeResolution);
+                InjectIfPresent(inputs, "max_faces", s.maxFaces);
+                InjectIfPresent(inputs, "remove_background", s.removeBackground);
+            }
+            if (inputs.ContainsKey("save_path"))
+            {
+                string currentPath = inputs["save_path"].ToString();
+                if(currentPath.Contains("Mesh_")) 
+                    inputs["save_path"] = $"Mesh_{seed}.glb";
+            }
+            if (inputs.ContainsKey("seed")) inputs["seed"] = seed;
+        }
     }
 
-    private static string GetJSONTemplate(string filename, int seed, Comfy3DParams p)
+    private static void InjectIfPresent(JObject inputs, string key, object value) 
     {
-        string json = @"
-        {
-        ""3"": {
-            ""inputs"": {
-                ""subfolder"": ""hunyuan3d-dit-v2-1""
-            },
-            ""class_type"": ""[Comfy3D] Load Hunyuan3D 21 ShapeGen Pipeline""
-        },
-        ""4"": {
-            ""inputs"": {
-                ""seed"": %SEED%,
-                ""steps"": %STEPS%,
-                ""guidance_scale"": %GUIDANCE%,
-                ""octree_resolution"": %OCTREE%,
-                ""remove_background"": %REMOVEBG%,
-                ""auto_cleanup"": true,
-                ""max_faces"": %MAXFACES%,
-                ""shapegen_pipe"": [ ""3"", 0 ],
-                ""image"": [ ""6"", 0 ]
-            },
-            ""class_type"": ""[Comfy3D] Hunyuan3D 21 ShapeGen""
-        },
-        ""6"": {
-            ""inputs"": {
-                ""image"": ""%FILENAME%""
-            },
-            ""class_type"": ""LoadImage""
-        },
-        ""13"": {
-            ""inputs"": {
-                ""save_path"": ""Mesh_%SEED%.glb"",
-                ""use_fastmesh"": true,
-                ""mesh"": [ ""4"", 0 ]
-            },
-            ""class_type"": ""[Comfy3D] Save 3D Mesh""
-        },
-        ""23"": {
-            ""inputs"": {
-                ""offload_model"": true,
-                ""offload_cache"": true,
-                ""anything"": [ ""13"", 0 ]
-            },
-            ""class_type"": ""VRAMCleanup""
-        },
-        ""24"": {
-            ""inputs"": {
-                ""clean_file_cache"": true,
-                ""clean_processes"": true,
-                ""clean_dlls"": true,
-                ""retry_times"": 3,
-                ""anything"": [ ""13"", 0 ]
-            },
-            ""class_type"": ""RAMCleanup""
-        }
-        }";
-
-        return json
-            .Replace("%FILENAME%", filename)
-            .Replace("%SEED%", seed.ToString())
-            .Replace("%STEPS%", p.steps.ToString())
-            .Replace("%GUIDANCE%", p.guidance.ToString("F1").Replace(',', '.')) 
-            .Replace("%OCTREE%", p.octreeResolution.ToString())
-            .Replace("%MAXFACES%", p.maxFaces.ToString())
-            .Replace("%REMOVEBG%", p.removeBackground.ToString().ToLower());
+        if (inputs.ContainsKey(key)) 
+        { 
+            if (value is int i && i > 0) 
+                inputs[key] = i; 
+            else if (value is float f && f > 0) 
+                inputs[key] = f; 
+        } 
     }
 }
 #endif

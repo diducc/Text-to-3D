@@ -2,10 +2,14 @@ using UnityEditor;
 using UnityEngine.UIElements;
 using GraphProcessor;
 using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
+using System.IO;
 
 [NodeCustomEditor(typeof(ComfyGen3DNode))]
 public class Comfy3DNodeView : BaseNodeView
 {
+    private DropdownField modelDropdown;
     private Button generateButton;
     private Button resetButton;
     private Label statusLabel;
@@ -14,13 +18,43 @@ public class Comfy3DNodeView : BaseNodeView
     public override void Enable()
     {
         var node = nodeTarget as ComfyGen3DNode;
+        style.width = 300;
 
         var buttonContainer = new VisualElement();
         buttonContainer.style.flexDirection = FlexDirection.Row;
 
+        var modelsPath = Path.Combine(Application.dataPath, "Editor/ComfyJSON/3D");
+        List<string> jsonFiles = new List<string>();
 
+        if (Directory.Exists(modelsPath))
+        {
+            jsonFiles = Directory.GetFiles(modelsPath, "*.json")
+                                .Select(Path.GetFileName)
+                                .ToList();
 
-        style.width = 300; 
+        }
+        else
+        {
+            jsonFiles.Add("No Templates Found");
+        }
+        modelDropdown = new DropdownField("Model", jsonFiles, 0);
+        modelDropdown.style.marginBottom = 10;
+
+        if (!string.IsNullOrEmpty(node.selectedModelFile) && jsonFiles.Contains(node.selectedModelFile))
+        {
+            modelDropdown.value = node.selectedModelFile;
+        }
+        else if (jsonFiles.Count > 0)
+        {
+            node.selectedModelFile = jsonFiles[0];
+            modelDropdown.value = jsonFiles[0];
+        }
+
+        modelDropdown.RegisterValueChangedCallback(evt => {
+            node.selectedModelFile = evt.newValue;
+        });
+
+        controlsContainer.Add(modelDropdown);
 
         generateButton = new Button(() => GenerateClick(node))
         {

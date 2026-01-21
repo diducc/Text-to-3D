@@ -82,7 +82,6 @@ public class ComfyGenTexNode : BaseNode
                     var asset = AssetDatabase.LoadAssetAtPath<Object>(finalPath);
                     EditorGUIUtility.PingObject(asset);
                     
-                    Debug.Log($"[TexGen] Model Textured: {finalPath}");
                 }
             },
             (err) => {

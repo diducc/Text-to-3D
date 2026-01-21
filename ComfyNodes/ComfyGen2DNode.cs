@@ -79,7 +79,6 @@ public class ComfyGen2DNode : BaseNode
                 outputTexture = tex; 
                 statusMessage = "Success!"; 
                 isProcessing = false;
-                Debug.Log("[Generator] Success Texture received.");
             },
             (err) => { 
                 statusMessage = $"Error: {err}"; 
